@@ -1,0 +1,449 @@
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+x-healthcheck-defaults: &healthcheck-defaults
+  interval: 30s
+  timeout: 10s
+  retries: 5
+  start_period: 30s
+
+x-restart-policy: &restart-policy
+  restart: unless-stopped
+
+x-security-opts: &security-opts
+  security_opt:
+    - no-new-privileges:true
+  cap_drop:
+    - ALL
+
+services:
+  # ============================================
+  # PostgreSQL - Airflow Metadata Database
+  # ============================================
+  postgres:
+    image: postgres:15-alpine  
+    container_name: ${PROJECT_NAME:-srm}-postgres
+    <<: [*restart-policy, *security-opts]
+    user: "999:999"  
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-airflow}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env}
+      POSTGRES_DB: ${POSTGRES_DB:-airflow}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres-db-volume:/var/lib/postgresql/data
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    networks:
+      - backend-network
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-airflow}"]
+      interval: 10s
+      retries: 5
+      start_period: 5s
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 256M
+    logging: *default-logging
+
+  # ============================================
+  # MinIO - S3-Compatible Storage
+  # ============================================
+  minio:
+    image: minio/minio:RELEASE.2024-01-31T20-20-33Z  
+    container_name: ${PROJECT_NAME:-srm}-minio
+    command: server /data --console-address ":9001"
+    <<: *restart-policy
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:?MINIO_ROOT_USER must be set in .env}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
+    volumes:
+      - minio-data:/data
+    ports:
+      - "${MINIO_API_PORT:-9000}:9000"   # API
+      - "${MINIO_CONSOLE_PORT:-9001}:9001"  # Console
+    networks:
+      - pipeline-network
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "mc", "ready", "local"]
+      timeout: 20s
+      retries: 3
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    logging: *default-logging
+
+  # ============================================
+  # MinIO Init - Creates S3 bucket on startup
+  # ============================================
+  minio-init:
+    image: minio/mc
+    container_name: ${PROJECT_NAME:-srm}-minio-init
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set myminio http://minio:9000 $${MINIO_ROOT_USER} $${MINIO_ROOT_PASSWORD}; do
+        echo 'Waiting for MinIO...'; sleep 2;
+      done;
+      mc mb --ignore-existing myminio/${S3_BUCKET:-cnpj-data};
+      echo 'Bucket created successfully';
+      "
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-minioadmin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:?MINIO_ROOT_PASSWORD must be set in .env}
+      S3_BUCKET: ${S3_BUCKET:-cnpj-data}
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - pipeline-network
+    logging: *default-logging
+
+  # ============================================
+  # Spark Master
+  # ============================================
+  spark-master:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.spark
+    image: ${PROJECT_NAME:-srm}-spark:${APP_VERSION:-latest}
+    container_name: ${PROJECT_NAME:-srm}-spark-master
+    <<: [*restart-policy, *security-opts]
+    cap_add:
+      - NET_BIND_SERVICE  
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.master.Master
+    environment:
+      - SPARK_MASTER_HOST=spark-master
+      - SPARK_MASTER_PORT=7077
+      - SPARK_MASTER_WEBUI_PORT=8080
+
+      - PYSPARK_PYTHON=python3.11
+
+      - SPARK_DAEMON_JAVA_OPTS=-Dspark.eventLog.enabled=true -Dspark.eventLog.dir=/tmp/spark-events
+
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      # Data Layer Paths
+      - BRONZE_LAYER_PATH=${BRONZE_LAYER_PATH:-/opt/data/bronze}
+      - SILVER_LAYER_PATH=${SILVER_LAYER_PATH:-/opt/data/silver}
+      - GOLD_LAYER_PATH=${GOLD_LAYER_PATH:-/opt/data/gold}
+    volumes:
+      - ../data/raw:/opt/data/raw:ro  
+      - ../src/pipeline_srm:/opt/pipeline_srm:ro  
+      - spark-events:/tmp/spark-events  
+    ports:
+      - "${SPARK_MASTER_UI_PORT:-8080}:8080"  # Spark Master UI
+      - "${SPARK_MASTER_PORT:-7077}:7077"      # Spark Master
+    networks:
+      - pipeline-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging: *default-logging
+
+  # ============================================
+  # Spark Worker 1
+  # ============================================
+  spark-worker-1:
+    image: ${PROJECT_NAME:-srm}-spark:${APP_VERSION:-latest}
+    container_name: ${PROJECT_NAME:-srm}-spark-worker-1
+    <<: [*restart-policy, *security-opts]
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-2G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+     
+      - PYSPARK_PYTHON=python3.11
+
+      - SPARK_DAEMON_JAVA_OPTS=-Dspark.eventLog.enabled=true -Dspark.eventLog.dir=/tmp/spark-events
+
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+   
+      - BRONZE_LAYER_PATH=${BRONZE_LAYER_PATH:-/opt/data/bronze}
+      - SILVER_LAYER_PATH=${SILVER_LAYER_PATH:-/opt/data/silver}
+      - GOLD_LAYER_PATH=${GOLD_LAYER_PATH:-/opt/data/gold}
+    volumes:
+      - ../data/raw:/opt/data/raw:ro  
+      - ../src/pipeline_srm:/opt/pipeline_srm:ro
+      - spark-events:/tmp/spark-events  
+    depends_on:
+      spark-master:
+        condition: service_started
+    networks:
+      - pipeline-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging: *default-logging
+
+  # ============================================
+  # Spark Worker 2
+  # ============================================
+
+  spark-worker-2:
+    image: ${PROJECT_NAME:-srm}-spark:${APP_VERSION:-latest}
+    container_name: ${PROJECT_NAME:-srm}-spark-worker-2
+    <<: [*restart-policy, *security-opts]
+    command: /opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077
+    environment:
+      - SPARK_WORKER_MEMORY=${SPARK_WORKER_MEMORY:-2G}
+      - SPARK_WORKER_CORES=${SPARK_WORKER_CORES:-2}
+     
+      - PYSPARK_PYTHON=python3.11
+
+      - SPARK_DAEMON_JAVA_OPTS=-Dspark.eventLog.enabled=true -Dspark.eventLog.dir=/tmp/spark-events
+
+      - S3_ENDPOINT=${S3_ENDPOINT:-http://minio:9000}
+      - S3_ACCESS_KEY=${S3_ACCESS_KEY:-minioadmin}
+      - S3_SECRET_KEY=${S3_SECRET_KEY}
+      # Data Layer Paths
+      - BRONZE_LAYER_PATH=${BRONZE_LAYER_PATH:-/opt/data/bronze}
+      - SILVER_LAYER_PATH=${SILVER_LAYER_PATH:-/opt/data/silver}
+      - GOLD_LAYER_PATH=${GOLD_LAYER_PATH:-/opt/data/gold}
+    volumes:
+      - ../data/raw:/opt/data/raw:ro  
+      - ../src/pipeline_srm:/opt/pipeline_srm:ro
+      - spark-events:/tmp/spark-events  
+    depends_on:
+      spark-master:
+        condition: service_started
+    networks:
+      - pipeline-network
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging: *default-logging
+
+  # ============================================
+  # Spark History Server
+  # ============================================
+
+  spark-history-server:
+    image: apache/spark:3.5.0
+    container_name: ${PROJECT_NAME:-srm}-spark-history
+    <<: [*restart-policy, *security-opts]
+    cap_add:
+      - NET_BIND_SERVICE
+    command: >
+      /opt/spark/sbin/start-history-server.sh
+    environment:
+
+      - SPARK_HISTORY_OPTS=-Dspark.history.fs.logDirectory=/tmp/spark-events -Dspark.history.ui.port=18080 -Dspark.history.retainedApplications=50 -Dspark.history.fs.cleaner.enabled=true -Dspark.history.fs.cleaner.maxAge=7d
+      - SPARK_NO_DAEMONIZE=true
+    volumes:
+      - spark-events:/tmp/spark-events:ro  # Read-only access to event logs
+    ports:
+      - "${SPARK_HISTORY_PORT:-18080}:18080"  # Spark History Server UI
+    depends_on:
+      spark-master:
+        condition: service_started
+    networks:
+      - pipeline-network
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "-f", "http://localhost:18080"]
+      start_period: 60s
+    deploy:
+      resources:
+        limits:
+          cpus: '0.5'
+          memory: 512M
+        reservations:
+          cpus: '0.1'
+          memory: 256M
+    logging: *default-logging
+
+  # ============================================
+  # Airflow Webserver
+  # ============================================
+  airflow-webserver:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile.airflow
+    image: ${PROJECT_NAME:-srm}-airflow:${APP_VERSION:-latest}
+    container_name: ${PROJECT_NAME:-srm}-airflow-webserver
+    command: webserver
+    <<: [*restart-policy, *security-opts]
+    cap_add:
+      - NET_BIND_SERVICE  
+    environment:
+      # Airflow Core Configuration
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY:?AIRFLOW_FERNET_KEY must be set in .env}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+      AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
+      AIRFLOW__WEBSERVER__EXPOSE_CONFIG: 'false'  
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY:?AIRFLOW_WEBSERVER_SECRET_KEY must be set in .env}
+      _AIRFLOW_DB_UPGRADE: 'true'
+      _AIRFLOW_WWW_USER_CREATE: 'true'
+      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-airflow}
+      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:?AIRFLOW_ADMIN_PASSWORD must be set in .env}
+      # Spark Cluster Connection
+      SPARK_MASTER_URL: ${SPARK_MASTER_URL:-spark://spark-master:7077}
+      # S3/MinIO Configuration (for pipeline_srm.config)
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      # Data Layer Paths
+      BRONZE_LAYER_PATH: ${BRONZE_LAYER_PATH:-/opt/data/bronze}
+      SILVER_LAYER_PATH: ${SILVER_LAYER_PATH:-/opt/data/silver}
+      GOLD_LAYER_PATH: ${GOLD_LAYER_PATH:-/opt/data/gold}
+      # CNPJ Download Configuration (Federal Revenue Nextcloud WebDAV)
+
+      CNPJ_SHARE_TOKEN: ${CNPJ_SHARE_TOKEN:-YggdBLfdninEJX9}
+      CNPJ_WEBDAV_URL: ${CNPJ_WEBDAV_URL:-https://arquivos.receitafederal.gov.br/public.php/webdav}
+      CNPJ_DOWNLOAD_DIR: ${CNPJ_DOWNLOAD_DIR:-/opt/data/raw}
+    volumes:
+      - ../dags:/opt/airflow/dags:ro  
+      - ../data/raw:/opt/data/raw  
+      - airflow-logs:/opt/airflow/logs
+      - ../src/pipeline_srm:/opt/airflow/pipeline_srm:ro
+    ports:
+      - "${AIRFLOW_WEBSERVER_PORT:-8081}:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks:
+      - pipeline-network
+      - backend-network
+    healthcheck:
+      <<: *healthcheck-defaults
+      test: ["CMD", "curl", "--fail", "http://localhost:8080/health"]
+    deploy:
+      resources:
+        limits:
+          cpus: '1.0'
+          memory: 1G
+        reservations:
+          cpus: '0.25'
+          memory: 512M
+    logging: *default-logging
+
+  # ============================================
+  # Airflow Scheduler
+  # ============================================
+
+  airflow-scheduler:
+    image: ${PROJECT_NAME:-srm}-airflow:${APP_VERSION:-latest}
+    container_name: ${PROJECT_NAME:-srm}-airflow-scheduler
+    command: scheduler
+    <<: [*restart-policy, *security-opts]
+    environment:
+      # Airflow Core Configuration
+      AIRFLOW__CORE__EXECUTOR: LocalExecutor
+      AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER:-airflow}:${POSTGRES_PASSWORD}@postgres/${POSTGRES_DB:-airflow}
+      AIRFLOW__CORE__FERNET_KEY: ${AIRFLOW_FERNET_KEY}
+      AIRFLOW__CORE__DAGS_ARE_PAUSED_AT_CREATION: 'true'
+      AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
+  
+      AIRFLOW__WEBSERVER__SECRET_KEY: ${AIRFLOW_WEBSERVER_SECRET_KEY}
+
+      SPARK_MASTER_URL: ${SPARK_MASTER_URL:-spark://spark-master:7077}
+
+      PYSPARK_PYTHON: python3.11
+      PYSPARK_DRIVER_PYTHON: python3.11
+   
+      AIRFLOW__SCHEDULER__SCHEDULER_HEALTH_CHECK_THRESHOLD: '30'
+      GUNICORN_CMD_ARGS: '--timeout 120'
+
+      S3_ENDPOINT: ${S3_ENDPOINT:-http://minio:9000}
+      S3_ACCESS_KEY: ${S3_ACCESS_KEY:-minioadmin}
+      S3_SECRET_KEY: ${S3_SECRET_KEY}
+      # Data Layer Paths
+      BRONZE_LAYER_PATH: ${BRONZE_LAYER_PATH:-/opt/data/bronze}
+      SILVER_LAYER_PATH: ${SILVER_LAYER_PATH:-/opt/data/silver}
+
+      CNPJ_SHARE_TOKEN: ${CNPJ_SHARE_TOKEN:-YggdBLfdninEJX9}
+      CNPJ_WEBDAV_URL: ${CNPJ_WEBDAV_URL:-https://arquivos.receitafederal.gov.br/public.php/webdav}
+      CNPJ_DOWNLOAD_DIR: ${CNPJ_DOWNLOAD_DIR:-/opt/data/raw}
+    volumes:
+      - ../dags:/opt/airflow/dags:ro  # Read-only DAGs for security
+      - ../data/raw:/opt/data/raw  # Local filesystem for ZIP downloads only
+      - airflow-logs:/opt/airflow/logs
+      - ../src/pipeline_srm:/opt/airflow/pipeline_srm:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      airflow-webserver:
+        condition: service_started
+    networks:
+      - pipeline-network
+      - backend-network
+    healthcheck:
+      <<: *healthcheck-defaults
+
+      test: ["CMD-SHELL", "airflow jobs check --job-type SchedulerJob --hostname $$HOSTNAME"]
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 1G
+    logging: *default-logging
+
+# ============================================
+# Networks
+# ============================================
+
+networks:
+  pipeline-network:
+    driver: bridge
+    name: ${PROJECT_NAME:-srm}-pipeline
+  backend-network:
+    driver: bridge
+    name: ${PROJECT_NAME:-srm}-backend
+    internal: true  
+
+# ============================================
+# Volumes
+# ============================================
+volumes:
+  postgres-db-volume:
+    driver: local
+    name: ${PROJECT_NAME:-srm}-postgres-data
+  minio-data:
+    driver: local
+    name: ${PROJECT_NAME:-srm}-minio-data
+  airflow-logs:
+    driver: local
+    name: ${PROJECT_NAME:-srm}-airflow-logs
+  spark-events:
+    driver: local
+    name: ${PROJECT_NAME:-srm}-spark-events

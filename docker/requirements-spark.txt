@@ -1,0 +1,9 @@
+# ============================================
+# Spark Container Dependencies
+# ============================================
+
+
+click==8.1.7
+requests==2.31.0
+tenacity==8.2.3
+pandas==2.0.3  # Python 3.8 compatible (Apache Spark 3.5.0 base image)

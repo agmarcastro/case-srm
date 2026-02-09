@@ -1,0 +1,22 @@
+# CNPJ Data Extraction Pipeline Requirements
+
+# Core dependencies
+pyspark==3.5.0
+click==8.1.7
+requests==2.31.0
+tenacity==8.2.3
+pandas==2.1.4
+
+# Airflow
+apache-airflow==2.8.1
+apache-airflow-providers-apache-spark==4.5.0
+
+# Testing
+pytest==7.4.3
+pytest-cov==4.1.0
+
+# Code quality
+black==23.12.1
+ruff==0.1.9
+mypy==1.7.1
+pre-commit==3.6.0

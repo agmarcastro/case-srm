@@ -1,0 +1,11 @@
+# ============================================
+# Airflow Container Dependencies
+# ============================================
+
+
+apache-airflow-providers-apache-spark==4.5.0
+pyspark==3.5.0
+click==8.1.7
+requests==2.31.0
+tenacity==8.2.3
+pandas==2.1.4

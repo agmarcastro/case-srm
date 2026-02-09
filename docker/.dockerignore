@@ -1,0 +1,140 @@
+# ============================================
+# .dockerignore - Build Context Optimization
+# ============================================
+
+
+# ============================================
+# Version Control
+# ============================================
+.git
+.gitignore
+.gitattributes
+.github/
+
+# ============================================
+# CI/CD
+# ============================================
+.gitlab-ci.yml
+azure-pipelines.yml
+.circleci/
+.travis.yml
+Jenkinsfile
+
+# ============================================
+# Documentation
+# ============================================
+*.md
+!README.md
+docs/
+CHANGELOG*
+LICENSE
+CONTRIBUTING*
+
+# ============================================
+# Development
+# ============================================
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# ============================================
+# Python
+# ============================================
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.hypothesis/
+*.ipynb_checkpoints
+
+# ============================================
+# Virtual Environments
+# ============================================
+venv/
+env/
+ENV/
+.venv/
+virtualenv/
+
+# ============================================
+# Environment & Secrets (CRITICAL)
+# ============================================
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+.aws/
+.gcp/
+
+# ============================================
+# Testing
+# ============================================
+tests/
+test/
+__tests__/
+*.test.*
+*.spec.*
+pytest.ini
+.pytest_cache/
+
+# ============================================
+# Logs
+# ============================================
+*.log
+logs/
+*.log.*
+
+# ============================================
+# Data (exclude from build context)
+# ============================================
+data/bronze/
+data/silver/
+data/gold/
+*.parquet
+*.csv
+*.json
+*.xml
+
+# ============================================
+# Docker
+# ============================================
+docker-compose*.yml
+!docker-compose.yml
+Dockerfile*
+!Dockerfile.*
+.dockerignore
+
+# ============================================
+# Airflow
+# ============================================
+airflow.db
+airflow.cfg
+webserver_config.py
+logs/
+
+# ============================================
+# Temporary Files
+# ============================================
+tmp/
+temp/
+*.tmp
+*.bak
+*.swp

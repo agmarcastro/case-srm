@@ -1,0 +1,57 @@
+
+
+
+FROM apache/airflow:2.8.1-python3.11
+
+
+LABEL org.opencontainers.image.title="Pipeline SRM - Airflow" \
+      org.opencontainers.image.description="Airflow orchestration for SRM data pipeline" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.vendor="SRM Project" \
+      maintainer="SRM Team"
+
+
+USER root
+
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    default-jdk \
+    curl \
+    && rm -rf /var/lib/apt/lists/* \
+    && apt-get clean
+
+# Set JAVA_HOME for PySpark (dynamically detected)
+ENV JAVA_HOME=/usr/lib/jvm/default-java
+
+
+RUN mkdir -p /tmp/spark-jars && \
+    curl -sL -o /tmp/spark-jars/hadoop-aws-3.3.4.jar \
+    https://repo1.maven.org/maven2/org/apache/hadoop/hadoop-aws/3.3.4/hadoop-aws-3.3.4.jar && \
+    curl -sL -o /tmp/spark-jars/aws-java-sdk-bundle-1.12.262.jar \
+    https://repo1.maven.org/maven2/com/amazonaws/aws-java-sdk-bundle/1.12.262/aws-java-sdk-bundle-1.12.262.jar && \
+    chmod -R 777 /tmp/spark-jars
+
+# Switch to airflow user for Python dependencies
+USER airflow
+
+# Install Python dependencies with cache mount (BuildKit optimization)
+
+COPY --chown=airflow:root docker/requirements-airflow.txt /tmp/requirements.txt
+
+RUN --mount=type=cache,target=/home/airflow/.cache/pip,uid=50000 \
+    pip install --no-cache-dir -r /tmp/requirements.txt && \
+    rm -f /tmp/requirements.txt && \
+    cp /tmp/spark-jars/*.jar /home/airflow/.local/lib/python3.11/site-packages/pyspark/jars/
+
+COPY --chown=airflow:root src/pipeline_srm /opt/airflow/pipeline_srm
+
+ENV PYTHONPATH="/opt/airflow:${PYTHONPATH}" \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+WORKDIR /opt/airflow
+
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+  CMD airflow jobs check --job-type SchedulerJob --hostname "$${HOSTNAME}" || exit 1
+
+
