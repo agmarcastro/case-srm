@@ -77,7 +77,7 @@ Infrastructure:
 - **Docker Compose orchestration** with health checks and resource limits
 - **Apache Airflow DAG** scheduling with Spark cluster submission
 - **Spark History Server** for post-execution job analysis
-- **CLI interface** with Click for manual pipeline execution
+
 
 ## Quick Start
 
@@ -130,15 +130,6 @@ This starts 8 services:
 ```bash
 # Via Airflow (recommended)
 docker exec srm-airflow-scheduler airflow dags trigger cnpj_extraction_pipeline_v2
-
-# Via CLI (inside Spark master)
-docker exec -it srm-spark-master python -m pipeline_srm.cli extract \
-  --execution-date 2026-02-05
-
-# Single file for testing
-docker exec -it srm-spark-master python -m pipeline_srm.cli extract \
-  --execution-date 2026-02-05 --file-index 0
-```
 
 ### 5. Verify Data in MinIO
 
@@ -309,38 +300,8 @@ Projeto_SRM/
 | MinIO | 1.0 | 1 GB |
 | PostgreSQL | 1.0 | 1 GB |
 
-## Testing
-
-```bash
-# Install test dependencies
-pip install -r docker/requirements-spark.txt
-
-# Generate sample data (1000 records)
-python tests/data/generate_sample.py
-
-# Run all tests
-pytest tests/ -v
-
-# With coverage
-pytest tests/ --cov=pipeline_srm --cov-report=term-missing
-
-# Specific test
-pytest tests/unit/test_config.py -v
 ```
 
-## CLI Usage
-
-```bash
-pipeline-srm extract --help
-
-Options:
-  --execution-date TEXT                Execution date (YYYY-MM-DD, default: today)
-  --file-index INTEGER                Download single file index (0-9) for testing
-  --skip-download                     Skip download, use existing files
-  --output-format [parquet|json|csv]  Output format for Gold layer
-  --skip-validation                   Skip validation steps
-  --help                              Show this message and exit.
-```
 
 ## Troubleshooting
 
@@ -381,27 +342,6 @@ docker exec -it srm-spark-master pyspark
 | **Missing hadoop-aws JARs** | Rebuild images: `docker compose build --no-cache` |
 | **Airflow can't reach Spark** | Check `SPARK_MASTER_URL` in `.env` matches cluster |
 
-## Development
-
-### Local Setup
-
-```bash
-python -m venv venv
-source venv/bin/activate
-
-pip install -r docker/requirements-spark.txt
-pre-commit install
-
-pytest tests/ -v
-```
-
-### Code Quality
-
-```bash
-black src/ tests/       # Format
-ruff check src/         # Lint
-mypy src/               # Type check
-```
 
 ## License
 
