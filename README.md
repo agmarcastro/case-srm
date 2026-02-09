@@ -131,7 +131,7 @@ This starts 8 services:
 # Via Airflow (recommended)
 docker exec srm-airflow-scheduler airflow dags trigger cnpj_extraction_pipeline_v2
 
-### 5. Verify Data in MinIO
+###  Verify Data in MinIO
 
 Open http://localhost:9001, navigate to the `cnpj-data` bucket, and verify:
 - `bronze/dt_ingestion=YYYY-MM-DD/` -- Raw Parquet files
@@ -247,6 +247,24 @@ Projeto_SRM/
     └── requirements-airflow.txt  # Airflow Python dependencies
 
 ```
+## Execution Results
+
+After the DAG completes, you can verify the success of the pipeline through the Airflow logs or the final report generated in the validation.generate_report task
+
+### Final Summary Report:
+
+As shown in the execution logs above, the pipeline provides a clear business summary:
+
+- Reference Month: Successfully processed the 2026-01 period.
+
+- Active Establishments: Identified ~2.5M active Matrix records and ~85k active Filial records.
+
+- Validation Pass: Both Business and Output validation layers returned True, ensuring data quality standards were met.
+
+
+![Orquestração da Pipeline SRM](notes/resultado_obtido.png)
+*Figura 1: Orquestração da Pipeline de CNPJ*
+
 
 ## Validation Framework
 
@@ -299,9 +317,6 @@ Projeto_SRM/
 | Airflow Scheduler | 1.5 | 1.5 GB |
 | MinIO | 1.0 | 1 GB |
 | PostgreSQL | 1.0 | 1 GB |
-
-```
-
 
 ## Troubleshooting
 
